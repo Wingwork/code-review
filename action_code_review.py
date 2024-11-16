@@ -205,6 +205,7 @@ def main():
     persona = PERSONAS.get(os.environ.get("PERSONA", DEFAULT_PERSONA))
     style = STYLES.get(os.environ.get("STYLE", DEFAULT_STYLE))
     include_files = os.environ.get("INCLUDE_FILES", "false") == "true"
+    model = os.environ.get("MODEL", DEFAULT_OPENAI_MODEL if api_to_use == 'openai' else DEFAULT_ANTHROPIC_MODEL)
     api_key_env_var = API_KEYS.get(api_to_use)
 
     # Make sure the necessary environment variable is set
@@ -220,10 +221,10 @@ def main():
 
     # Instantiate the appropriate LLM class
     if api_to_use == "openai":
-        llm = OpenAI_LLM(DEFAULT_OPENAI_MODEL)
+        llm = OpenAI_LLM(model)
         openai.api_key = os.environ[api_key_env_var]  # Set the API key for OpenAI
     elif api_to_use == "anthropic":
-        llm = Anthropic_LLM(DEFAULT_ANTHROPIC_MODEL)
+        llm = Anthropic_LLM(model)
     else:
         raise ValueError(f"Invalid API: {api_to_use}. Expected one of ['openai', 'anthropic'].")
 
