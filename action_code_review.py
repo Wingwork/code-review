@@ -9,11 +9,11 @@ from typing import List
 
 FILENAME_VALID_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 GIT_DIFF_FILENAME_REGEX_PATTERN = r"\+\+\+ b/(.*)"
-DEFAULT_OPENAI_MODEL = "gpt-4-1106-preview"
-DEFAULT_ANTHROPIC_MODEL = "claude-instant-1.2"
+DEFAULT_OPENAI_MODEL = "gpt-4-turbo-preview"
+DEFAULT_ANTHROPIC_MODEL = "claude-3-sonnet-20240229"
 DEFAULT_STYLE = "concise"
 DEFAULT_PERSONA = "kent_beck"
-LLM_TEMPERATURE = 0.1
+LLM_TEMPERATURE = 0.3
 LLM_MAX_TOKENS = 4096
 
 OPENAI_ERROR_NO_RESPONSE = "No response from OpenAI. wtf Error:\n"
@@ -24,18 +24,53 @@ API_KEYS = {
     "anthropic": "ANTHROPIC_API_KEY",
 }
 
-REQUEST = "Reply on how to improve the code (below). Think step-by-step. Give code examples of specific changes. Limit suggestions to 3 high quality examples\n"
+REQUEST = """
+Analyze the code changes and provide a comprehensive code review focusing on:
+
+1. Code Quality & Best Practices
+2. Performance Improvements 
+3. Security Considerations
+4. Potential Bugs or Edge Cases
+
+For each suggestion:
+- Explain the issue clearly
+- Provide a specific code example showing the improvement
+- Explain why this change would be beneficial
+
+Format your response in markdown with clear sections and code blocks.
+Limit to 3 most important suggestions.
+"""
 
 STYLES = {
-    "zen": "Format feedback in the style of a zen koan",
-    "concise": "Format feedback concisely with numbered list",
+    "zen": "Format feedback in a thoughtful, mindful way focusing on fundamental improvements",
+    "concise": """Format feedback as a clear, numbered list with:
+- Issue description
+- Code example
+- Benefits
+""",
 }
 
 PERSONAS = {
-    "developer": "You are an experienced software developer in a variety of programming languages and methodologies. You create efficient, scalable, and fault-tolerant solutions",
-    "kent_beck": "You are Kent Beck. You are known for software design patterns, test-driven development (TDD), and agile methodologies",
-    "marc_benioff": "You are Marc Benioff, internet entrepreneur and experienced software developer",
-    "yoda": "You are Yoda, legendary Jedi Master. Speak like Yoda",
+    "developer": """You are a senior software architect with expertise in:
+- Clean code principles
+- Security best practices  
+- Performance optimization
+- System design patterns""",
+    "kent_beck": """You are Kent Beck, focusing on:
+- Simple design
+- Test-driven development
+- Refactoring patterns
+- Code maintainability""",
+    "marc_benioff": """You are Marc Benioff, emphasizing:
+- Enterprise scalability
+- Code reliability
+- Team collaboration
+- Business value""",
+    "yoda": """You are Yoda, the Jedi Master of Code. Focus on:
+- Wisdom in simplicity
+- Balance in design
+- Learning from mistakes
+- Speak in Yoda's style""",
 }
 
 
@@ -43,6 +78,7 @@ class BaseLLM:
     """
     Base class for language learning models.
     """
+
     def __init__(self, model: str):
         self.model = model
 
@@ -60,37 +96,43 @@ class BaseLLM:
         """
         raise NotImplementedError
 
+
 class OpenAI_LLM(BaseLLM):
     """
-    OpenAI LLM implementation.
+    OpenAI LLM implementation using latest API.
     """
+
     def prepare_kwargs(self, prompt: str, max_tokens: int, temperature: float) -> dict:
         kwargs = {
             "model": self.model,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "messages": [{"role": "system", "content": prompt}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert code reviewer focused on improving code quality, security, and performance.",
+                },
+                {"role": "user", "content": prompt},
+            ],
         }
         return kwargs
 
     def call_api(self, kwargs: dict) -> str:
         try:
             response = openai.chat.completions.create(**kwargs)
-            if response.choices:
-                if "text" in response.choices[0]:
-                    return response.choices[0].text.strip()
-                else:
-                    return response.choices[0].message.content.strip()
-            else:
-                return OPENAI_ERROR_NO_RESPONSE + response.text
+            return response.choices[0].message.content.strip()
         except Exception as e:
             print(f"OpenAI API call failed with parameters {kwargs}. Error: {e}")
-            raise Exception(f"OpenAI API call failed with parameters {kwargs}. Error: {e}")
+            raise Exception(
+                f"OpenAI API call failed with parameters {kwargs}. Error: {e}"
+            )
+
 
 class Anthropic_LLM(BaseLLM):
     """
-    Anthropic LLM implementation.
+    Anthropic LLM implementation using latest Claude API.
     """
+
     def __init__(self, model: str):
         super().__init__(model)
         self.anthropic = Anthropic()
@@ -98,19 +140,21 @@ class Anthropic_LLM(BaseLLM):
     def prepare_kwargs(self, prompt: str, max_tokens: int, temperature: float) -> dict:
         kwargs = {
             "model": self.model,
-            "max_tokens_to_sample": max_tokens,
-            "prompt": f"{HUMAN_PROMPT}\n{prompt}\n{AI_PROMPT}",
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
         }
         return kwargs
 
     def call_api(self, kwargs: dict) -> str:
         try:
-            
-            response = self.anthropic.completions.create(**kwargs)
-            return response.completion.strip()
+            response = self.anthropic.messages.create(**kwargs)
+            return response.content[0].text.strip()
         except Exception as e:
             print(f"Anthropic API call failed with parameters {kwargs}. Error: {e}")
-            raise Exception(f"Anthropic API call failed with parameters {kwargs}. Error: {e}")
+            raise Exception(
+                f"Anthropic API call failed with parameters {kwargs}. Error: {e}"
+            )
 
 
 def validate_filename(filename: str) -> bool:
@@ -123,9 +167,11 @@ def validate_filename(filename: str) -> bool:
     Returns:
       bool: True if the filename is valid, False otherwise
     """
-    return not any(
-           char in filename for char in set(filename) - set(FILENAME_VALID_CHARS)
-       ) and ".." not in filename and "/" not in filename
+    return (
+        not any(char in filename for char in set(filename) - set(FILENAME_VALID_CHARS))
+        and ".." not in filename
+        and "/" not in filename
+    )
 
 
 def extract_filenames_from_diff_text(diff_text: str) -> List[str]:
@@ -201,11 +247,16 @@ def get_prompt(
 
 def main():
     # Get environment variables
-    api_to_use = os.environ.get("API_TO_USE", "openai")  # Default to OpenAI if not specified
+    api_to_use = os.environ.get(
+        "API_TO_USE", "openai"
+    )  # Default to OpenAI if not specified
     persona = PERSONAS.get(os.environ.get("PERSONA", DEFAULT_PERSONA))
     style = STYLES.get(os.environ.get("STYLE", DEFAULT_STYLE))
     include_files = os.environ.get("INCLUDE_FILES", "false") == "true"
-    model = os.environ.get("MODEL", DEFAULT_OPENAI_MODEL if api_to_use == 'openai' else DEFAULT_ANTHROPIC_MODEL)
+    model = os.environ.get(
+        "MODEL",
+        DEFAULT_OPENAI_MODEL if api_to_use == "openai" else DEFAULT_ANTHROPIC_MODEL,
+    )
     api_key_env_var = API_KEYS.get(api_to_use)
 
     # Make sure the necessary environment variable is set
@@ -226,15 +277,18 @@ def main():
     elif api_to_use == "anthropic":
         llm = Anthropic_LLM(model)
     else:
-        raise ValueError(f"Invalid API: {api_to_use}. Expected one of ['openai', 'anthropic'].")
+        raise ValueError(
+            f"Invalid API: {api_to_use}. Expected one of ['openai', 'anthropic']."
+        )
 
     # Prepare kwargs for the API call
     kwargs = llm.prepare_kwargs(prompt, LLM_MAX_TOKENS, LLM_TEMPERATURE)
-    
+
     # Call the API and print the review text
     review_text = llm.call_api(kwargs)
 
     print(f"{review_text}")
+
 
 if __name__ == "__main__":
     main()

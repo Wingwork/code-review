@@ -1,107 +1,103 @@
-name: Code Review Github Action
+name: AI-Powered Code Review
 author: Frank Chen (@fxchen)
-description: 'Improve your pull requests and code base with AI-assisted code reviews'
+description: "Enhance pull requests with AI-assisted code reviews using GPT-4 or Claude"
+
 inputs:
   github-token:
-    description: 'The token used to authenticate with the GitHub API'
+    description: "GitHub token for API access"
     required: false
     default: ${{ github.token }}
+
   api-to-use:
-    description: 'The API to use for code review (openai, claude)'
+    description: "AI provider to use (openai or claude)"
     required: false
-    default: 'openai'
+    default: "openai"
+
   openai-key:
-    description: 'The OpenAI API key'
-    required: true
+    description: "OpenAI API key (required if using OpenAI)"
+    required: false
+
   anthropic-key:
-    description: 'The Anthropic (Claude) API key'
+    description: "Anthropic API key (required if using Claude)"
     required: false
-  model: 
-    description: 'The OpenAI or Anthropic language model to use for code review'
+
+  model:
+    description: "AI model to use (e.g., gpt-4-turbo-preview, claude-3-sonnet-20240229)"
     required: false
-    default: 'gpt-3.5-turbo-16k'
+    default: "gpt-4-turbo-preview"
+
   persona:
-    description: 'The persona to use in the prompt (developer, kent_beck, marc_benioff, yoda)'
+    description: "Review persona (developer, kent_beck, marc_benioff, yoda)"
     required: false
-    default: 'kent_beck'
+    default: "developer"
+
   style:
-    description: 'The style of output to use (concise, zen)'
+    description: "Review style (concise, zen)"
     required: false
-    default: 'concise'
+    default: "concise"
+
   include-full-files:
-    description: 'Whether to include full files in addition to the diff (true or false)'
+    description: "Include complete file contents in review"
     required: false
-    default: 'false'
+    default: "false"
+
   post-if-error:
-    description: 'Whether to post a comment if there was an error'
+    description: "Post comment on review failure"
     required: false
-    default: 'false'
+    default: "true"
+
   exclude-files:
-    description: 'A list of flags to exclude from the action (comma separated). E.g. "package.json,pyproject.toml"'
+    description: "Files to exclude (comma-separated)"
     required: false
-    default: ''
+    default: "package-lock.json,yarn.lock,*.lock,*.sum"
 
 outputs:
   results:
-    description: 'Code review results (experimental)'
+    description: "Code review results in markdown format"
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    - name: Install Python
-      uses: actions/setup-python@v4
+    - name: Setup Python
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: "3.11"
+        cache: "pip"
 
     - name: Install Dependencies
-      run: pip install -r ${{ github.action_path }}/requirements.txt
-      shell: bash
-    - name: Get common ancestor for branch point
-      id: first_commit
       run: |
-        # Find the common ancestor of the base branch and the head branch
-        common_ancestor=$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
-        echo "sha=$common_ancestor" >> $GITHUB_OUTPUT
+        python -m pip install --upgrade pip
+        pip install -r ${{ github.action_path }}/requirements.txt
       shell: bash
 
-    - name: Prepare excluded files
-      id: prepare_exclude
+    - name: Prepare Review
+      id: prepare
       run: |
-        exclude_flags=${{ inputs.exclude-files }}
-        IFS=', ' read -r -a exclude_array <<< "$exclude_flags"
+        # Convert exclude files to array
+        IFS=', ' read -r -a exclude_array <<< "${{ inputs.exclude-files }}"
         exclude_str=""
-        for index in "${!exclude_array[@]}"
-        do
-            exclude_str+="':!${exclude_array[index]}' "
+        for file in "${exclude_array[@]}"; do
+          exclude_str+=":!${file} "
         done
-        echo "exclude_files=$exclude_str" >> $GITHUB_OUTPUT
+        echo "exclude_files=${exclude_str}" >> $GITHUB_OUTPUT
       shell: bash
-    
-    - name: Run git diff
-      id: git_diff
+
+    - name: Generate Diff
       run: |
-        source $GITHUB_OUTPUT
-        git diff --merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} -- . ${{ steps.prepare_exclude.outputs.exclude_files }} > diff.txt
+        git diff --merge-base ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} -- . ${{ steps.prepare.outputs.exclude_files }} > diff.txt
       shell: bash
-    - name: Get git diff
-      id: print_diff
-      run: |
-        echo "::set-output name=diff::$(cat diff.txt)"
-      shell: bash
-    - name: Print diff 
-      run: echo "${{ steps.print_diff.outputs.diff }}"
-      shell: bash
-    - name: Run OpenAI code review
-      id: openai
+
+    - name: Run Code Review
+      id: review
       run: |
         cat diff.txt | python ${{ github.action_path }}/action_code_review.py > review.txt
-        echo 'reviewresult<<EOF' >> $GITHUB_OUTPUT
-        echo "$(cat review.txt)" >> $GITHUB_OUTPUT
+        echo 'review_result<<EOF' >> $GITHUB_OUTPUT
+        cat review.txt >> $GITHUB_OUTPUT
         echo 'EOF' >> $GITHUB_OUTPUT
       shell: bash
       env:
@@ -116,25 +112,19 @@ runs:
         COMMIT_TITLE: ${{ github.event.pull_request.title }}
         COMMIT_BODY: ${{ github.event.pull_request.body }}
 
-    - name: Show output in case of failure
-      id: err-output
-      if: failure()
-      run: |
-        echo 'errorresult<<EOF' >> $GITHUB_OUTPUT
-        echo "ERROR: $(cat review.txt)" >> $GITHUB_OUTPUT
-        echo 'EOF' >> $GITHUB_OUTPUT
-        echo "Review result and error: $(cat review.txt)"
-      shell: bash
-
-    - name: Create comment
-      if: success() || (inputs.post-if-error && inputs.post-if-error != 'false')
+    - name: Create Review Comment
+      if: success() || inputs.post-if-error == 'true'
       uses: peter-evans/create-or-update-comment@v3
       with:
         issue-number: ${{ github.event.pull_request.number }}
         body: |
-          # Review:
-          ${{ steps.openai.outputs.reviewresult && steps.openai.outputs.reviewresult || steps.err-output.outputs.errorresult }}
+          # AI Code Review
+
+          ${{ steps.review.outputs.review_result }}
+
+          ---
+          *Generated using ${{ inputs.api-to-use }} ${{ inputs.model }}*
 
 branding:
-  icon: 'user-check'
-  color: 'green'
+  icon: "code"
+  color: "purple"
