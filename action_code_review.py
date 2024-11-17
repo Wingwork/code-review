@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 import os
 import sys
-import openai
 import string
 import re
-from anthropic import Anthropic, HUMAN_PROMPT, AI_PROMPT
 from typing import List
+from litellm import completion
+from litellm.exceptions import (
+    BadRequestError,
+    RateLimitError,
+    AuthenticationError,
+    ContextLengthExceededError,
+)
 
 FILENAME_VALID_CHARS = "-_.() %s%s" % (string.ascii_letters, string.digits)
 GIT_DIFF_FILENAME_REGEX_PATTERN = r"\+\+\+ b/(.*)"
+
+# Model configurations
 DEFAULT_OPENAI_MODEL = "gpt-4-turbo-preview"
 DEFAULT_ANTHROPIC_MODEL = "claude-3-sonnet-20240229"
 DEFAULT_STYLE = "concise"
@@ -16,8 +23,23 @@ DEFAULT_PERSONA = "kent_beck"
 LLM_TEMPERATURE = 0.3
 LLM_MAX_TOKENS = 4096
 
-OPENAI_ERROR_NO_RESPONSE = "No response from OpenAI. wtf Error:\n"
-OPENAI_ERROR_FAILED = "OpenAI failed to generate a review. Error:\n"
+# API configurations
+SUPPORTED_MODELS = {
+    "openai": [
+        "gpt-4-turbo-preview",
+        "gpt-4-0125-preview",
+        "gpt-4-1106-preview",
+        "gpt-4",
+        "gpt-4-32k",
+        "gpt-3.5-turbo",
+        "gpt-3.5-turbo-16k",
+    ],
+    "anthropic": [
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307",
+    ],
+}
 
 API_KEYS = {
     "openai": "OPENAI_API_KEY",
@@ -74,99 +96,70 @@ PERSONAS = {
 }
 
 
-class BaseLLM:
+class LiteLLMWrapper:
     """
-    Base class for language learning models.
+    Wrapper for LiteLLM to handle both OpenAI and Anthropic models.
     """
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, api_type: str):
         self.model = model
+        self.api_type = api_type
+        self.validate_model()
 
-    def prepare_kwargs(self, prompt: str, max_tokens: int, temperature: float) -> dict:
+    def validate_model(self) -> None:
         """
-        Prepares the keyword arguments for an LLM API call.
-        To be implemented by subclasses.
+        Validates if the model is supported for the given API type.
         """
-        raise NotImplementedError
+        if self.model not in SUPPORTED_MODELS.get(self.api_type, []):
+            supported = SUPPORTED_MODELS.get(self.api_type, [])
+            raise ValueError(
+                f"Model '{self.model}' is not supported for {self.api_type}. "
+                f"Supported models are: {sorted(supported)}"
+            )
 
-    def call_api(self, kwargs: dict) -> str:
+    def get_completion(self, prompt: str, max_tokens: int, temperature: float) -> str:
         """
-        Calls the LLM API using the provided kwargs.
-        To be implemented by subclasses.
+        Gets completion from LiteLLM with unified error handling.
         """
-        raise NotImplementedError
-
-
-class OpenAI_LLM(BaseLLM):
-    """
-    OpenAI LLM implementation using latest API.
-    """
-
-    def prepare_kwargs(self, prompt: str, max_tokens: int, temperature: float) -> dict:
-        kwargs = {
-            "model": self.model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": [
+        try:
+            messages = [
                 {
                     "role": "system",
                     "content": "You are an expert code reviewer focused on improving code quality, security, and performance.",
                 },
                 {"role": "user", "content": prompt},
-            ],
-        }
-        return kwargs
+            ]
 
-    def call_api(self, kwargs: dict) -> str:
-        try:
-            response = openai.chat.completions.create(**kwargs)
+            response = completion(
+                model=self.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
             return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"OpenAI API call failed with parameters {kwargs}. Error: {e}")
-            raise Exception(
-                f"OpenAI API call failed with parameters {kwargs}. Error: {e}"
+
+        except AuthenticationError:
+            print(
+                f"Authentication failed for {self.api_type}. Please check your API key."
             )
-
-
-class Anthropic_LLM(BaseLLM):
-    """
-    Anthropic LLM implementation using latest Claude API.
-    """
-
-    def __init__(self, model: str):
-        super().__init__(model)
-        self.anthropic = Anthropic()
-
-    def prepare_kwargs(self, prompt: str, max_tokens: int, temperature: float) -> dict:
-        kwargs = {
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        return kwargs
-
-    def call_api(self, kwargs: dict) -> str:
-        try:
-            response = self.anthropic.messages.create(**kwargs)
-            return response.content[0].text.strip()
+            raise
+        except RateLimitError:
+            print(f"Rate limit exceeded for {self.api_type}.")
+            raise
+        except ContextLengthExceededError:
+            print(f"Input too long for {self.model}. Try reducing the input size.")
+            raise
+        except BadRequestError as e:
+            print(f"Invalid request: {str(e)}")
+            raise
         except Exception as e:
-            print(f"Anthropic API call failed with parameters {kwargs}. Error: {e}")
-            raise Exception(
-                f"Anthropic API call failed with parameters {kwargs}. Error: {e}"
-            )
+            print(f"Unexpected error with {self.api_type}: {str(e)}")
+            raise
 
 
 def validate_filename(filename: str) -> bool:
-    """
-    Validates a filename by checking for directory traversal and unusual characters.
-
-    Args:
-      filename: str, filename to be validated
-
-    Returns:
-      bool: True if the filename is valid, False otherwise
-    """
+    """Validates a filename by checking for directory traversal and unusual characters."""
     return (
         not any(char in filename for char in set(filename) - set(FILENAME_VALID_CHARS))
         and ".." not in filename
@@ -175,35 +168,17 @@ def validate_filename(filename: str) -> bool:
 
 
 def extract_filenames_from_diff_text(diff_text: str) -> List[str]:
-    """
-    Extracts filenames from git diff text using regular expressions.
-
-    Args:
-      diff_text: str, git diff text
-
-    Returns:
-      List of filenames
-    """
+    """Extracts filenames from git diff text using regular expressions."""
     filenames = re.findall(GIT_DIFF_FILENAME_REGEX_PATTERN, diff_text)
-    sanitized_filenames = [fn for fn in filenames if validate_filename(fn)]
-    return sanitized_filenames
+    return [fn for fn in filenames if validate_filename(fn)]
 
 
 def format_file_contents_as_markdown(filenames: List[str]) -> str:
-    """
-    Iteratively goes through each filename and concatenates
-    the filename and its content in a specific markdown format.
-
-    Args:
-      filenames: List of filenames
-
-    Returns:
-      Formatted string
-    """
+    """Formats file contents as markdown."""
     formatted_files = ""
     for filename in filenames:
         try:
-            with open(filename, "r") as file:
+            with open(filename, "r", encoding="utf-8") as file:
                 file_content = file.read()
             formatted_files += f"\n{filename}\n```\n{file_content}\n```\n"
         except Exception as e:
@@ -218,38 +193,20 @@ def get_prompt(
     include_files: bool,
     filenames: List[str] = None,
 ) -> str:
-    """
-    Generates a prompt for use with an LLM
-
-    Args:
-      diff: str, the git diff text
-      persona: str, the persona to use for the feedback
-      style: str, the style of the feedback
-      include_files: bool, whether to include file contents in the prompt
-      filenames: List[str], optional list of filenames to include in the prompt
-
-    Returns:
-      str: The generated prompt
-    """
-
+    """Generates a prompt for the LLM."""
     prompt = f"{persona}.{style}.{REQUEST}\n{diff}"
 
-    # Optionally include files from the diff
-    if include_files:
-        if filenames is None:
-            filenames = extract_filenames_from_diff_text(diff)
-        if filenames:
-            formatted_files = format_file_contents_as_markdown(filenames)
-            prompt += formatted_files
+    if include_files and filenames is None:
+        filenames = extract_filenames_from_diff_text(diff)
+    if include_files and filenames:
+        prompt += format_file_contents_as_markdown(filenames)
 
     return prompt
 
 
 def main():
     # Get environment variables
-    api_to_use = os.environ.get(
-        "API_TO_USE", "openai"
-    )  # Default to OpenAI if not specified
+    api_to_use = os.environ.get("API_TO_USE", "openai")
     persona = PERSONAS.get(os.environ.get("PERSONA", DEFAULT_PERSONA))
     style = STYLES.get(os.environ.get("STYLE", DEFAULT_STYLE))
     include_files = os.environ.get("INCLUDE_FILES", "false") == "true"
@@ -257,37 +214,35 @@ def main():
         "MODEL",
         DEFAULT_OPENAI_MODEL if api_to_use == "openai" else DEFAULT_ANTHROPIC_MODEL,
     )
-    api_key_env_var = API_KEYS.get(api_to_use)
 
-    # Make sure the necessary environment variable is set
+    # Validate API key
+    api_key_env_var = API_KEYS.get(api_to_use)
     if api_key_env_var is None or api_key_env_var not in os.environ:
         print(f"The {api_key_env_var} environment variable is not set.")
         sys.exit(1)
 
-    # Read in the diff
+    # Read diff
     diff = sys.stdin.read()
+    if not diff.strip():
+        print("No diff content provided.")
+        sys.exit(1)
 
-    # Generate the prompt
-    prompt = get_prompt(diff, persona, style, include_files)
+    try:
+        # Initialize LiteLLM wrapper
+        llm = LiteLLMWrapper(model=model, api_type=api_to_use)
 
-    # Instantiate the appropriate LLM class
-    if api_to_use == "openai":
-        llm = OpenAI_LLM(model)
-        openai.api_key = os.environ[api_key_env_var]  # Set the API key for OpenAI
-    elif api_to_use == "anthropic":
-        llm = Anthropic_LLM(model)
-    else:
-        raise ValueError(
-            f"Invalid API: {api_to_use}. Expected one of ['openai', 'anthropic']."
-        )
+        # Generate and get completion
+        prompt = get_prompt(diff, persona, style, include_files)
+        review_text = llm.get_completion(prompt, LLM_MAX_TOKENS, LLM_TEMPERATURE)
 
-    # Prepare kwargs for the API call
-    kwargs = llm.prepare_kwargs(prompt, LLM_MAX_TOKENS, LLM_TEMPERATURE)
+        print(review_text)
 
-    # Call the API and print the review text
-    review_text = llm.call_api(kwargs)
-
-    print(f"{review_text}")
+    except (ValueError, AuthenticationError, RateLimitError) as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
